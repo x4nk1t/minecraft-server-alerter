@@ -1,0 +1,122 @@
+# Push a commit whose message is "Release vX.Y.Z" (matching the version in Cargo.toml)
+# and this builds static Linux binaries and publishes them as GitHub release vX.Y.Z.
+# Any lines after the first become the release notes.
+#
+# Actions → Release → Run workflow builds the binaries without releasing, to check the build.
+name: Release
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check release commit
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'Release v')
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.version.outputs.release }}
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: version
+        if: github.event_name == 'push'
+        env:
+          MESSAGE: ${{ github.event.head_commit.message }}
+        run: bash .github/scripts/release-version.sh
+
+  build:
+    name: Build ${{ matrix.asset }}
+    needs: check
+    if: needs.check.outputs.release == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            asset: mcsa-x86_64-linux
+            run: ""
+          - target: aarch64-unknown-linux-musl
+            asset: mcsa-aarch64-linux
+            packages: gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user
+            run: qemu-aarch64
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install cross compiler
+        if: matrix.packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ matrix.packages }}
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --target ${{ matrix.target }} --no-self-update
+          rustup default stable
+
+      - name: Test
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: cargo test
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Smoke test
+        run: |
+          bin=target/${{ matrix.target }}/release/mcsa
+          file "$bin"
+          ${{ matrix.run }} "$bin" --version
+
+      - name: Package
+        run: |
+          mkdir dist
+          cp target/${{ matrix.target }}/release/mcsa dist/${{ matrix.asset }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: [check, build]
+    if: needs.check.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: mcsa-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum mcsa-* | tee SHA256SUMS
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check.outputs.version }}
+          PRERELEASE: ${{ needs.check.outputs.prerelease }}
+          MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          # Everything after the subject line is the release notes, minus leading blank
+          # lines and Co-authored-by/Signed-off-by trailers.
+          notes=$(printf '%s\n' "$MESSAGE" | tail -n +2 | sed -E '/^(co-authored-by|signed-off-by):/Id' | sed '/./,$!d')
+          flags=()
+          if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
+          gh release create "v$VERSION" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "v$VERSION" \
+            --notes "$notes" \
+            --generate-notes \
+            "${flags[@]}"

@@ -1,0 +1,10 @@
+# `ring` (TLS crypto) compiles a little C. Its C code barely touches libc, so a regular
+# gcc works for the static musl builds; no musl cross toolchain needed.
+[env]
+CC_x86_64_unknown_linux_musl = "gcc"
+CC_aarch64_unknown_linux_musl = "aarch64-linux-gnu-gcc"
+
+# ARM builds from an x86 machine need an aarch64 cross gcc named aarch64-linux-gnu-gcc,
+# e.g. gcc-aarch64-linux-gnu and libc6-dev-arm64-cross on Debian/Ubuntu.
+[target.aarch64-unknown-linux-musl]
+linker = "aarch64-linux-gnu-gcc"
